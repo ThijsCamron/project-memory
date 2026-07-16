@@ -1,0 +1,8 @@
+{
+  "name": "project-memory",
+  "version": "0.1.0",
+  "description": "Per-project memory met hard tokenbudget: compacte index bij sessiestart, retrieval on demand bij elke prompt, triage bij stop, dagelijkse consolidatie. Opslag als git-diffbare Markdown in .claude/memory/.",
+  "author": {
+    "name": "Thijs"
+  }
+}

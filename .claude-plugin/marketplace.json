@@ -1,0 +1,13 @@
+{
+  "name": "project-memory-marketplace",
+  "owner": {
+    "name": "Thijs"
+  },
+  "plugins": [
+    {
+      "name": "project-memory",
+      "source": "./",
+      "description": "Team-memory in je repo: git-native Markdown-opslag, pull-model met tokenbudget, semantische retrieval via SQLite, git-geverifieerde entries, ADR-export en secret-scrubbing."
+    }
+  ]
+}
