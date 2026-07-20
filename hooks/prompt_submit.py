@@ -11,7 +11,13 @@ Met --search "termen" werkt dit script als los zoekcommando.
 """
 
 import os
+import signal
 import sys
+
+try:  # nette exit als output door head/less wordt afgekapt
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+except (AttributeError, ValueError):
+    pass
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import memlib  # noqa: E402
@@ -27,9 +33,11 @@ def _semantic_topic_hits(cfg, root):
         hits = {}
         if not embeddings or cfg["retrieval"] == "keyword":
             return hits
+        emb_name = embeddings.get_embedder(cfg).name
+        th = memlib.effective_semantic_threshold(cfg, emb_name)
         for label, store in memlib.read_stores(cfg, root):
             for topic, score in embeddings.topic_scores(store, cfg, prompt).items():
-                if score >= cfg["semantic_threshold"]:
+                if score >= th:
                     path = os.path.join(store, "topics", f"{topic}.md")
                     key = (label, topic)
                     hits[key] = max(hits.get(key, (0, path))[0], score), path
@@ -62,9 +70,10 @@ def full_entries(cfg, root, prompt, budget):
     if picked or not embeddings or cfg["retrieval"] == "keyword":
         return picked
     used, out, seen = 0, [], set()
+    th = memlib.effective_semantic_threshold(cfg, embeddings.get_embedder(cfg).name)
     for label, store in memlib.read_stores(cfg, root):
         for score, e in embeddings.search(store, cfg, prompt, top_k=10):
-            if score < cfg["semantic_threshold"]:
+            if score < th:
                 continue
             key = (e["title"], e["date"])
             if key in seen:
@@ -104,7 +113,38 @@ def main() -> int:
 
     root = memlib.find_project_root(data.get("cwd", os.getcwd()))
     cfg = memlib.load_config(root)
-    if cfg["scope"] == "off" or cfg["injection"] == "off":
+    if cfg["scope"] == "off":
+        return 0
+
+    # direct opslaan: "onthoud: ..." wacht niet op de Stop-hook
+    stripped = prompt.strip()
+    for prefix in ("onthoud:", "remember:"):
+        if stripped.lower().startswith(prefix):
+            text = stripped[len(prefix):].strip()
+            if not text:
+                break
+            topic = memlib.classify(text, memlib.get_triggers(cfg)) or "gotchas"
+            store = memlib.write_store(cfg, root)
+            result = memlib.append_entry(store, topic, memlib.title_from(text),
+                                         memlib.extract_keywords(text), text,
+                                         refs=memlib.extract_refs(text, root), cfg=cfg)
+            if result["added"]:
+                memlib.rebuild_index(cfg, root)
+                try:
+                    import embeddings
+                    embeddings.sync(store, cfg)
+                except Exception:
+                    pass
+                note = f"Direct opgeslagen in topics/{memlib.slug(topic)}.md"
+                if result["redacted"]:
+                    note += f" ({result['redacted']} geheim(en) geredigeerd)"
+                if result["superseded"]:
+                    note += " | vervangt: " + "; ".join(result["superseded"])
+                memlib.emit_context("UserPromptSubmit", note)
+                memlib.log(store, f"prompt_submit: direct opgeslagen in {topic}")
+            return 0
+
+    if cfg["injection"] == "off":
         return 0
 
     if cfg["injection"] == "full":
@@ -116,12 +156,37 @@ def main() -> int:
         hits = topic_hits(cfg, root, prompt)
         if not hits:
             return 0
-        lines = [f"- [{label}] {topic}: {info['path']}"
-                 for (label, topic), info in list(hits.items())[:3]]
-        context = ("Over dit onderwerp bestaat opgeslagen memory. Lees bij twijfel "
-                   "het bestand met Read:\n" + "\n".join(lines))
+        # scope-nee is een waarschuwing, geen gewone hint: titels direct tonen
+        warn_lines = []
+        for (label, topic), _info in hits.items():
+            if topic != "scope-nee":
+                continue
+            for _lab, store in memlib.read_stores(cfg, root):
+                if _lab == label:
+                    pw = memlib._prompt_words(prompt)
+                    for e in memlib.topic_entries(store, "scope-nee"):
+                        if memlib.score_entry(e, pw) > 0:
+                            warn_lines.append(f"  - {e['title']}: {e['body'][:140]}")
+        normal = [f"- [{label}] {topic}: {info['path']}"
+                  for (label, topic), info in list(hits.items())[:3]
+                  if topic != "scope-nee"]
+        parts = []
+        if warn_lines:
+            parts.append("WAARSCHUWING: dit raakt mogelijk iets dat expliciet "
+                         "BUITEN scope is afgesproken:\n" + "\n".join(warn_lines[:3])
+                         + "\nBenoem dit expliciet voordat je eraan begint te bouwen.")
+        if normal:
+            parts.append("Over dit onderwerp bestaat opgeslagen memory. Lees bij "
+                         "twijfel het bestand met Read:\n" + "\n".join(normal))
+        if not parts:
+            return 0
+        context = "\n\n".join(parts)
 
     memlib.emit_context("UserPromptSubmit", context)
+    for _label, store in memlib.read_stores(cfg, root):
+        if os.path.isdir(store):
+            memlib.log(store, f"prompt_submit: injectie ({memlib.token_estimate(context)} tokens, {cfg['injection']})")
+            break
     return 0
 
 

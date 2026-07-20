@@ -58,6 +58,12 @@ De instelling landt in `.claude/memory/config.json` en reist mee met de repo. Vo
 | `/project-memory:memory-search <termen>` | doorzoek alle actieve stores |
 | `/project-memory:memory-status` | aantallen en tokenkosten per store |
 | `/project-memory:memory-export-adr` | beslissingen als ADR's naar docs/adr/ |
+| `/project-memory:memory-report` | HTML-dashboard: activiteit, tijdlijn, kosten, gebruik |
+| `/project-memory:memory-recent [dagen]` | terminal-tijdlijn van recente activiteit |
+| `/project-memory:memory-import <pad>` | destilleer een document of transcript naar entries |
+| `/project-memory:memory-import-jira <key>` | destilleer blijvende kennis uit een Jira-project |
+| `/project-memory:memory-asof <ref>` | tijdmachine: wat wisten we toen |
+| `/project-memory:memory-patterns <map>` | terugkerende kennis over projecten heen |
 
 ## Installatie en configuratie
 
@@ -66,6 +72,63 @@ claude --plugin-dir /pad/naar/project-memory
 ```
 
 Omgevingsvariabelen (winnen van elke config): `MEMORY_SCOPE`, `MEMORY_INJECTION`, `MEMORY_INDEX_BUDGET`, `MEMORY_RETRIEVAL_BUDGET`, `MEMORY_ARCHIVE_DAYS`, `MEMORY_MAX_ENTRIES`.
+
+## Zelf herkennen wat bewaard moet worden (v0.11)
+
+Twee mechanismen bovenop de signaalwoord-triggers. Ten eerste herkennen de triggers nu ook impliciete besluiten ("laten we dan maar X nemen/gebruiken/kiezen", "dan doen we het met X"), werkwoord-beperkt zodat "laten we koffie halen" en "laten we hopen dat" niet triggeren; gemeten op de uitgebreide testset: 100% recall, 0 valse positieven. Ten tweede levert de plugin een skill mee (`memory-awareness`) die Claude in de sessie zelf leert herkennen wat bewaarwaard is, ook volledig zonder signaalwoord: impliciete besluiten die worden uitgevoerd, correcties van Claudes aannames, tijdens debuggen ontdekte valkuilen, en klant- of scopefeiten. Opslaan loopt via dezelfde CLI-route, dus scrubbing, dedupe en conflictdetectie gelden automatisch; de skill bevestigt elke opslag met 1 regel in het antwoord en slaat nooit eigen suggesties op als besluit. Twijfel wordt een korte vraag aan de gebruiker in plaats van een aanname.
+
+## Dashboard en activiteitsoverzicht (v0.10)
+
+Twee manieren om te zien wat er is gedaan, beide zonder server. `/project-memory:memory-recent [dagen]` geeft een terminal-tijdlijn: per dag de nieuwe entries, vervangen of verouderde besluiten, triage-resultaten en validatormeldingen. `/project-memory:memory-report` genereert het volledige HTML-dashboard (`.claude/memory/report.html`, zelfstandig bestand van ~11KB): kerncijfers, activiteit per week als grafiek (nieuwe entries versus reads door Claude), de tijdlijn met gebeurtenisbadges, de beslisgeschiedenis met vervangen-door-ketens, de topics-tabel met tokenkosten en leesfrequentie, en snoei-advies. Alle data komt uit wat het systeem toch al bijhoudt; er draait niets extra.
+
+Het dashboard toont ook de **bespaarde tokens en de indicatieve euro-waarde** (30 dagen). De methodiek is bewust conservatief en transparant: de nulmeting is "alle actieve memory elke sessie volledig in context" (de CLAUDE.md-aanpak die je zonder plugin zou gebruiken, gemeten als aantal sessies maal totale actieve memory-tokens), en daar gaat het werkelijke verbruik vanaf (gelogde injecties plus de tokens van topicbestanden die Claude daadwerkelijk las). De euro-omrekening gebruikt `price_eur_per_mtok` (default 2.75, gebaseerd op het Sonnet input-tarief van $3/MTok; instelbaar per project of via env). Twee eerlijke kanttekeningen staan ook in het dashboard zelf: abonnementsgebruikers betalen per plan en niet per token, en prompt caching verlaagt de werkelijke kosten van de nulmeting, dus lees het getal als indicatie van vermeden contextballast, niet als factuurbedrag.
+
+## Gemeten prestaties (v0.9.1)
+
+Retrieval is getuned op metingen in plaats van gevoel, met `hooks/benchmark.py`: een gouden set van 26 realistische NL-vragen tegen een gevulde baseline plus kickoff-project. Resultaat met de default-config (hybrid): **100% top-3 hint-accuraatheid, 73% top-1**, met een hook-latency van ~5ms scoring en enkele tientallen ms end-to-end inclusief Python-opstart, onmerkbaar per prompt. Twee verbeteringen kwamen uit de metingen: Nederlandse samenstellingen matchen nu op hun kern (dagplanning vindt keyword "planning"), en de semantische drempel is backend-bewust (gemeten optimum 0.12 voor de hash-backend; modelbackends houden de ingestelde waarde). Pure semantiek zonder keywords bleek aantoonbaar zwakker dan de combinatie; de hybride default is dus geen aanname meer maar een meetuitslag. Draai de benchmark zelf (en breid de gouden set uit met eigen vragen) via `python3 hooks/benchmark.py --sweep`.
+
+Daarnaast zijn vijf scenario-benchmarks gedraaid (v0.9.2). Triage: 87% recall op gemarkeerde uitspraken (impliciete besluiten zonder signaalwoord blijven een bewuste miss), 0 valse positieven na het verwijderen van de te brede "pas op"-trigger. Conflictdetectie: 100% op 10 paren inclusief gemene gevallen (JWT vs OAuth, Sentry vs Prometheus blijven terecht naast elkaar bestaan), dankzij een gemeten combinatieregel: matige similarity plus minstens 1 gedeeld trefwoord telt ook als conflict. Secret-scrubbing: 9/9 secretformaten gevangen, 0 valse positieven op onschuldige zinnen over wachtwoordbeleid en token buckets. Schaal: 1500 entries synchroniseren in 0.3s, semantisch zoeken in 27ms, budgetafkap werkt. Gelijktijdigheid: het verloren-update-probleem bij parallelle schrijvers (14/50 entries kwijt in de test) is opgelost met een exclusieve store-lock (fcntl) rond elke lees-wijzig-schrijf-cyclus; drie herhaalde runs met 2 parallelle schrijvers leveren nu 50/50 entries.
+
+## Opslagintegriteit (v0.9)
+
+De tekstopslag heeft nu database-garanties, zonder het git-reviewbare formaat op te geven:
+
+**Atomair schrijven.** Elke schrijfactie gaat via tempbestand + rename (hetzelfde mechanisme dat databases gebruiken); een crash laat nooit een half topicbestand achter. Verweesde tempbestanden ruimt de consolidatie op.
+
+**Round-trip-validatie.** Voor elke schrijfactie wordt het resultaat teruggeparsed en entry-voor-entry vergeleken; zou de parser ook maar 1 entry verliezen, dan wordt er niet geschreven en gelogd. Bodies worden bovendien gesaneerd zodat inhoud die zelf op het entry-formaat lijkt (een geciteerde header, een yaml-snippet die met "keywords:" begint) de parser niet kan misleiden. Stil dataverlies is daarmee technisch onmogelijk gemaakt.
+
+**Strikte validator.** `memlib.py validate` (draait ook mee in elke consolidatie en in /memory-status) controleert elk topic- en archiefbestand op schema: parseerbaarheid, tekst buiten het entry-formaat (merge-conflictmarkers, handmatige edits, kapotte headers), duplicaten en ontbrekende keywords. Bekende beperking: losse tekst die exact achter de laatste entry wordt geplakt is niet te onderscheiden van een meerregelige body en wordt stilzwijgend onderdeel daarvan; dat soort wijzigingen is wel altijd zichtbaar in de git-diff.
+
+## Agency-laag, tijdmachine en scope-bewaking (v0.8)
+
+**Klant-scope.** Naast project en globaal is er een derde niveau: de klant-store (`~/.claude/project-memory/customers/<naam>/`), voor kennis die projecten van dezelfde klant overstijgt (contactpersonen, beslissnelheid, afspraken). Instellen per project met `memory-config --customer "Dakdekker BV"`; de index toont die entries als `[klant]` en opslaan kan via `--store customer` of "klant" bij /memory-save. Deel de customers-map desgewenst als git-repo, net als de globale baseline.
+
+**Tijdmachine.** `/project-memory:memory-asof <commit|tag|2026-03>` reconstrueert via git wat het team op dat moment wist, schrijft de snapshot naar `.claude/memory/asof/` en toont expliciet wat er pas sindsdien is geleerd of vervangen. Vragen als "waarom is dit destijds zo gebouwd" worden beantwoord met de kennis van toen; wat er toen nog niet was, is meestal het echte antwoord.
+
+**Patroondetectie.** `/project-memory:memory-patterns ~/werk` scant alle projectstores onder een map, clustert vergelijkbare entries over projecten heen (embeddings) en rapporteert kennis die in 2+ projecten terugkomt als promotiekandidaat voor de klant- of bedrijfsbaseline. Zo voedt de praktijk vanzelf je baseline.
+
+**Negatieve memory.** Het topic `scope-nee` bewaakt wat expliciet niet moet. Uitspraken als "de klant wil geen app" of "buiten scope" worden automatisch getriageerd, en zodra een prompt die kant op beweegt injecteert de hook een WAARSCHUWING met de afspraak erbij, voordat er gebouwd wordt. Requirements zeggen wat wel; dit bewaakt wat nee was.
+
+## Documenten importeren (v0.6)
+
+`/project-memory:memory-import <pad> [doeltopic]` destilleert een document of gesprekstranscript naar memory-entries. Een voorbewerkingsscript herkent JSON/JSONL-transcripten, Teams/Zoom-ondertitels (.vtt/.srt, inclusief dedupe van rollende regels), Word (.docx, pure stdlib), PDF (via pdftotext of pypdf, met Read-fallback voor gescande PDF's), e-mail (.eml), HTML en platte tekst. Bij transcripten filtert het smalltalk en vulzinnen deterministisch weg (op een echt kickoff-transcript: van ~87k naar ~28k tokens), en splitst in leesbare chunks in `.claude/memory/imports/` (gitignored). Daarna leest Claude de chunks in de sessie zelf en extraheert requirements, besluiten, gotchas en klantcontext als losse entries, met bronvermelding en "(interpretatie)" bij onzekere transcriptiepassages. Opslag loopt via de normale route, dus scrubbing, deduplicatie en conflictdetectie gelden automatisch. Er is geen externe AI-dienst nodig: de destillatie gebeurt door de sessie die je toch al draait.
+
+Retrieval kent sinds v0.6 ook lichte NL/EN-stemming, zodat "tekenen van daken" gewoon matcht op entries over "tekening" en "dak".
+
+## Vangkwaliteit en meetlaag (v0.5)
+
+**Direct opslaan.** Een prompt die begint met `onthoud:` of `remember:` wordt meteen opgeslagen, zonder op het einde van de sessie te wachten. Je krijgt directe bevestiging inclusief eventuele redacties of vervangingen.
+
+**PreCompact-vangnet.** Vlak voordat Claude Code de context comprimeert, draait dezelfde triage als bij Stop. Beslissingen uit lange sessies gaan zo niet verloren bij compaction; deduplicatie voorkomt dubbele opslag als daarna ook de Stop-hook vuurt.
+
+**Semantische conflictdetectie.** Naast de keyword-drempel (3 gedeelde trefwoorden) worden conflicten in decisions/conventions nu ook via cosine similarity gevonden, met een backend-bewuste drempel (`conflict_threshold`, default 0.8 voor modelbackends, automatisch begrensd op 0.5 voor de hash-backend).
+
+**Eigen triggers.** Voeg bedrijfsjargon toe via de config zonder de plugin aan te passen:
+```json
+"triggers": [{"pattern": "(?i)\\bklantafspraak\\b", "topic": "klanten"}]
+```
+
+**Usage-tracking en rapport.** Een PostToolUse-hook registreert welke topicbestanden Claude echt leest (`.usage.jsonl`, blijft lokaal). De index sorteert topics op werkelijk gebruik, en `/project-memory:memory-report` genereert een statisch HTML-rapport met per store de omvang, tokenkosten, leesfrequentie (30/90 dagen) en snoei-advies. Geen server; het rapport is gewoon een bestand.
 
 ## Semantische retrieval (v0.4)
 

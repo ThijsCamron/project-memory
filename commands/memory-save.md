@@ -7,7 +7,7 @@ allowed-tools: Bash(python3:*)
 Sla het volgende op in de memory: $ARGUMENTS
 
 1. Bepaal het topic: decisions (techniekkeuze), conventions (stijl of afspraak), gotchas (valkuil of bekende bug), context (overig) of een eigen topicnaam als het onderwerp daar duidelijk om vraagt.
-2. Zegt de gebruiker "globaal" of gaat het om een persoonlijke voorkeur die niet aan dit project hangt, voeg dan --store global toe.
+2. Zegt de gebruiker "globaal", voeg dan --store global toe. Zegt de gebruiker "klant" of gaat het om kennis over de klant die projecten overstijgt (contactpersonen, beslissnelheid, voorkeuren), gebruik dan --store customer (werkt alleen als er een klant is ingesteld via /project-memory:memory-config --customer "<naam>").
 3. Formuleer een titel van maximaal 9 woorden en 3 tot 6 trefwoorden, en voer uit:
 
 ```

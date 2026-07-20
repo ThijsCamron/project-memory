@@ -29,7 +29,15 @@ import hashlib
 import json
 import os
 import re
+import signal
 import sys
+import tempfile
+from contextlib import contextmanager
+
+try:
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+except (AttributeError, ValueError):
+    pass
 
 DEFAULT_TOPICS = ["decisions", "conventions", "gotchas", "context"]
 CONFLICT_TOPICS = {"decisions", "conventions"}
@@ -43,9 +51,13 @@ DEFAULTS = {
     "archive_days": 30,
     "max_entries": 50,
     "retrieval": "hybrid",
+    "conflict_threshold": 0.8,
+    "triggers": [],
     "embedding_backend": "hash",
     "embedding_model": "",
     "semantic_threshold": 0.25,
+    "customer": "",
+    "price_eur_per_mtok": 2.75,
 }
 
 ENV_MAP = {
@@ -56,8 +68,11 @@ ENV_MAP = {
     "archive_days": "MEMORY_ARCHIVE_DAYS",
     "max_entries": "MEMORY_MAX_ENTRIES",
     "retrieval": "MEMORY_RETRIEVAL",
+    "conflict_threshold": "MEMORY_CONFLICT_THRESHOLD",
     "embedding_backend": "MEMORY_EMBEDDING_BACKEND",
     "embedding_model": "MEMORY_EMBEDDING_MODEL",
+    "customer": "MEMORY_CUSTOMER",
+    "price_eur_per_mtok": "MEMORY_PRICE_EUR_PER_MTOK",
     "semantic_threshold": "MEMORY_SEMANTIC_THRESHOLD",
 }
 
@@ -140,6 +155,11 @@ def global_store() -> str:
     return os.path.join(os.path.expanduser("~"), ".claude", "project-memory", "global")
 
 
+def customer_store(customer: str) -> str:
+    return os.path.join(os.path.expanduser("~"), ".claude", "project-memory",
+                        "customers", slug(customer))
+
+
 def ensure_store(store: str) -> str:
     os.makedirs(os.path.join(store, "topics"), exist_ok=True)
     os.makedirs(os.path.join(store, "archive"), exist_ok=True)
@@ -184,6 +204,16 @@ def load_config(root: str) -> dict:
         cfg["semantic_threshold"] = float(cfg["semantic_threshold"])
     except (TypeError, ValueError):
         cfg["semantic_threshold"] = DEFAULTS["semantic_threshold"]
+    try:
+        cfg["conflict_threshold"] = float(cfg["conflict_threshold"])
+    except (TypeError, ValueError):
+        cfg["conflict_threshold"] = DEFAULTS["conflict_threshold"]
+    try:
+        cfg["price_eur_per_mtok"] = float(cfg["price_eur_per_mtok"])
+    except (TypeError, ValueError):
+        cfg["price_eur_per_mtok"] = DEFAULTS["price_eur_per_mtok"]
+    if not isinstance(cfg.get("triggers"), list):
+        cfg["triggers"] = []
     return cfg
 
 
@@ -203,6 +233,8 @@ def read_stores(cfg: dict, root: str):
     stores = []
     if cfg["scope"] in ("project", "both"):
         stores.append(("project", project_store(root)))
+    if cfg.get("customer") and cfg["scope"] != "off":
+        stores.append(("klant", customer_store(cfg["customer"])))
     if cfg["scope"] in ("global", "both"):
         stores.append(("globaal", global_store()))
     return stores
@@ -210,6 +242,11 @@ def read_stores(cfg: dict, root: str):
 
 def write_store(cfg: dict, root: str, override: str = None) -> str:
     choice = override or ("global" if cfg["scope"] == "global" else "project")
+    if choice == "customer":
+        if not cfg.get("customer"):
+            choice = "project"  # geen klant ingesteld: veilig terugvallen
+        else:
+            return ensure_store(customer_store(cfg["customer"]))
     store = global_store() if choice == "global" else project_store(root)
     return ensure_store(store)
 
@@ -221,6 +258,108 @@ def log(store: str, msg: str) -> None:
             f.write(f"{stamp} {msg}\n")
     except OSError:
         pass
+
+
+# --------------------------------------------------------------- triggers ---
+
+DEFAULT_TRIGGERS = [
+    (r"(?i)\b(besluit|beslissing|we kiezen|gekozen voor|decision)\b", "decisions"),
+    (r"(?i)\b(vanaf nu|voortaan|from now on|in plaats van|instead of)\b", "decisions"),
+    (r"(?i)\b(conventie|afspraak|stijlregel|convention|altijd .{3,40} gebruiken|never use|nooit .{3,40} gebruiken)\b", "conventions"),
+    (r"(?i)\b(onthoud|remember this|let op|valkuil|gotcha|bekende bug|known issue)\b", "gotchas"),
+    (r"(?i)\b(niet in scope|buiten scope|out of scope|bewust niet|expliciet geen|wil geen|komt er niet)\b", "scope-nee"),
+    (r"(?i)\blaten we (dan )?(maar )?\w+([ \w]{0,25})? (nemen|gebruiken|kiezen)\b", "decisions"),
+    (r"(?i)\bdan doen we het met\b", "decisions"),
+]
+
+
+def get_triggers(cfg: dict):
+    """Default-triggers plus geldige eigen triggers uit de config.
+
+    Config-formaat: "triggers": [{"pattern": "(?i)\\bregex\\b", "topic": "naam"}]
+    """
+    triggers = list(DEFAULT_TRIGGERS)
+    for t in cfg.get("triggers", []):
+        if not isinstance(t, dict):
+            continue
+        pattern, topic = t.get("pattern"), t.get("topic", "context")
+        if not pattern:
+            continue
+        try:
+            re.compile(pattern)
+        except re.error:
+            continue
+        triggers.append((pattern, str(topic)))
+    return triggers
+
+
+def classify(sentence: str, triggers) -> str:
+    for pattern, topic in triggers:
+        if re.search(pattern, sentence):
+            return topic
+    return ""
+
+
+def title_from(sentence: str) -> str:
+    words = sentence.split()
+    return " ".join(words[:9]) + ("..." if len(words) > 9 else "")
+
+
+# ------------------------------------------------- integriteit van opslag ---
+
+@contextmanager
+def store_lock(store: str):
+    """Exclusieve lock per store rond lees-wijzig-schrijf, tegen verloren
+    updates bij gelijktijdige schrijvers (twee sessies, hook + handmatige
+    save). fcntl.flock geeft de lock automatisch vrij bij een crash."""
+    os.makedirs(store, exist_ok=True)
+    f = open(os.path.join(store, ".lock"), "w")
+    try:
+        try:
+            import fcntl
+            fcntl.flock(f, fcntl.LOCK_EX)
+        except ImportError:
+            pass  # niet-POSIX: geen lock, gedrag als voorheen
+        yield
+    finally:
+        try:
+            import fcntl
+            fcntl.flock(f, fcntl.LOCK_UN)
+        except ImportError:
+            pass
+        f.close()
+
+
+def _atomic_write(path: str, content: str) -> None:
+    """Schrijf via tempbestand + rename: een crash laat nooit een half
+    bestand achter (hetzelfde mechanisme dat databases zelf gebruiken)."""
+    d = os.path.dirname(path)
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp-", suffix=".part")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+_HEADER_LIKE = re.compile(r"^(## \d{4}-\d{2}-\d{2} \|)", re.MULTILINE)
+
+
+def _sanitize_body(body: str) -> str:
+    """Voorkom dat een body het entry-formaat zelf kan naspelen."""
+    body = _HEADER_LIKE.sub(r"·\1", body)
+    first = body.split("\n", 1)[0]
+    if re.match(r"^(keywords|refs|vervangt):", first):
+        body = "· " + body
+    return body
 
 
 # ---------------------------------------------------------------- entries ---
@@ -251,11 +390,7 @@ def list_topics(store: str):
     return sorted(f[:-3] for f in os.listdir(d) if f.endswith(".md"))
 
 
-def parse_entries(path: str, topic: str):
-    if not os.path.isfile(path):
-        return []
-    with open(path, encoding="utf-8") as f:
-        text = f.read()
+def parse_text(text: str, topic: str):
     entries = []
     for m in ENTRY_RE.finditer(text):
         kw = [k.strip().lower() for k in (m.group("keywords") or "").split(",") if k.strip()]
@@ -272,6 +407,34 @@ def parse_entries(path: str, topic: str):
             }
         )
     return entries
+
+
+def parse_entries(path: str, topic: str):
+    if not os.path.isfile(path):
+        return []
+    with open(path, encoding="utf-8") as f:
+        return parse_text(f.read(), topic)
+
+
+def serialize_entries(entries: list) -> str:
+    return "".join(format_entry(e) for e in entries)
+
+
+def write_validated(path: str, topic: str, entries: list) -> bool:
+    """Round-trip-check voor het schrijven: serialiseer, parse terug en
+    vergelijk. Zou de parser ook maar 1 entry verliezen, dan wordt er NIET
+    geschreven. Stil dataverlies is daarmee technisch onmogelijk."""
+    if not entries:
+        if os.path.isfile(path):
+            os.remove(path)
+        return True
+    content = serialize_entries(entries)
+    reparsed = parse_text(content, topic)
+    if [entry_fingerprint(e) for e in reparsed] != \
+            [entry_fingerprint(e) for e in entries]:
+        return False
+    _atomic_write(path, content)
+    return True
 
 
 def topic_entries(store: str, topic: str):
@@ -301,28 +464,27 @@ def format_entry(entry: dict) -> str:
     return "\n".join(lines) + "\n\n"
 
 
-def write_topic(store: str, topic: str, entries: list) -> None:
-    path = topic_path(store, topic)
-    if not entries:
-        if os.path.isfile(path):
-            os.remove(path)
-        return
-    with open(path, "w", encoding="utf-8") as f:
-        for e in entries:
-            f.write(format_entry(e))
+def write_topic(store: str, topic: str, entries: list) -> bool:
+    ok = write_validated(topic_path(store, topic), topic, entries)
+    if not ok:
+        log(store, f"write_topic GEWEIGERD (round-trip faalde): {topic}")
+    return ok
 
 
-def archive_entries(store: str, topic: str, entries: list, note: str = "") -> None:
+def archive_entries(store: str, topic: str, entries: list, note: str = "") -> bool:
     if not entries:
-        return
+        return True
     path = os.path.join(store, "archive", f"{slug(topic)}.md")
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "a", encoding="utf-8") as f:
-        for e in entries:
-            e = dict(e)
-            if note:
-                e["body"] = e["body"].rstrip() + f"\n{note}"
-            f.write(format_entry(e))
+    existing = parse_entries(path, topic)
+    for e in entries:
+        e = dict(e)
+        if note:
+            e["body"] = e["body"].rstrip() + f"\n{note}"
+        existing.append(e)
+    ok = write_validated(path, topic, existing)
+    if not ok:
+        log(store, f"archive GEWEIGERD (round-trip faalde): {topic}")
+    return ok
 
 
 def extract_refs(text: str, root: str, limit: int = 4):
@@ -355,8 +517,53 @@ def _find_conflicts(store: str, topic: str, candidate: dict):
     return conflicts
 
 
+def _semantic_conflicts(store: str, topic: str, candidate: dict, cfg: dict):
+    """Conflicten via cosine similarity, voor als keyword-overlap te laag is."""
+    entries = topic_entries(store, topic)
+    if not entries or not cfg:
+        return []
+    try:
+        import embeddings
+        emb = embeddings.get_embedder(cfg, store)
+        # hash-vectoren scoren structureel lager dan modelvectoren (bigram-
+        # penalty); bijna-identiek is daar ~0.6, echt verschillend ~0.15
+        threshold = cfg["conflict_threshold"]
+        if emb.name.startswith("hash"):
+            threshold = min(threshold, 0.5)
+        texts = [f"{e['title']}\n{e['body']}" for e in entries]
+        texts.append(f"{candidate['title']}\n{candidate['body']}")
+        vecs = emb.embed_batch(texts)
+        cand = vecs[-1]
+        is_hash = emb.name.startswith("hash")
+        cand_kw = {stem(k) for k in candidate["keywords"]}
+        out = []
+        for e, v in zip(entries, vecs[:-1]):
+            if len(v) != len(cand):
+                continue
+            sim = sum(a * b for a, b in zip(cand, v))
+            hit = sim >= threshold
+            if is_hash and not hit:
+                # gemeten combinatieregel: matige similarity + gedeeld trefwoord
+                overlap = len(cand_kw & {stem(k) for k in e["keywords"]})
+                hit = sim >= 0.25 and overlap >= 1
+            if hit:
+                out.append(e)
+        return out
+    except Exception:
+        return []
+
+
 def append_entry(store: str, topic: str, title: str, keywords, body: str,
-                 refs=None) -> dict:
+                 refs=None, cfg=None) -> dict:
+    """Publieke, gelockte variant: de hele lees-wijzig-schrijf-cyclus draait
+    exclusief per store, tegen verloren updates bij gelijktijdige schrijvers."""
+    with store_lock(store):
+        return _append_entry_unlocked(store, topic, title, keywords, body,
+                                      refs=refs, cfg=cfg)
+
+
+def _append_entry_unlocked(store: str, topic: str, title: str, keywords, body: str,
+                 refs=None, cfg=None) -> dict:
     """Voeg toe met scrubbing, dedupe en conflictdetectie.
 
     Resultaat: {added, reason, redacted, superseded:[titels]}
@@ -376,13 +583,15 @@ def append_entry(store: str, topic: str, title: str, keywords, body: str,
         "keywords": [k.strip().lower() for k in keywords if k.strip()][:8],
         "refs": list(refs or [])[:4],
         "supersedes": "",
-        "body": body_clean.strip(),
+        "body": _sanitize_body(body_clean.strip()),
     }
     if entry_fingerprint(candidate) in {entry_fingerprint(e) for e in all_entries(store)}:
         return {"added": False, "reason": "duplicaat", "redacted": redacted,
                 "superseded": []}
 
     conflicts = _find_conflicts(store, topic, candidate)
+    if not conflicts and cfg is not None and slug(topic) in CONFLICT_TOPICS:
+        conflicts = _semantic_conflicts(store, topic, candidate, cfg)
     if conflicts:
         remaining = [e for e in topic_entries(store, topic)
                      if entry_fingerprint(e) not in {entry_fingerprint(c) for c in conflicts}]
@@ -392,8 +601,12 @@ def append_entry(store: str, topic: str, title: str, keywords, body: str,
         newest = max(conflicts, key=lambda e: e["date"])
         candidate["supersedes"] = f"{newest['date']} | {newest['title']}"
 
-    with open(topic_path(store, topic), "a", encoding="utf-8") as f:
-        f.write(format_entry(candidate))
+    final = topic_entries(store, topic) + [candidate]
+    if not write_validated(topic_path(store, topic), topic, final):
+        log(store, f"append GEWEIGERD (round-trip faalde): {topic} | {candidate['title']}")
+        return {"added": False, "reason": "integriteitscheck faalde; entry zou "
+                "onparseerbaar zijn en is niet geschreven", "redacted": redacted,
+                "superseded": []}
     return {"added": True, "reason": "", "redacted": redacted,
             "superseded": [c["title"] for c in conflicts]}
 
@@ -407,6 +620,97 @@ def extract_keywords(text: str, limit: int = 6):
         freq[w] = freq.get(w, 0) + 1
     ranked = sorted(freq, key=lambda w: (-freq[w], w))
     return ranked[:limit]
+
+
+# -------------------------------------------------------------- validator ---
+
+def validate_store(store: str) -> list:
+    """Strikte schemacontrole. Retourneert een lijst bevindingen (leeg = ok)."""
+    issues = []
+    if not os.path.isdir(store):
+        return issues
+    for sub in ("topics", "archive"):
+        d = os.path.join(store, sub)
+        if not os.path.isdir(d):
+            continue
+        for fname in sorted(os.listdir(d)):
+            path = os.path.join(d, fname)
+            if fname.startswith(".tmp-"):
+                issues.append(f"{sub}/{fname}: achtergebleven tempbestand "
+                              "(afgebroken schrijfactie)")
+                continue
+            if not fname.endswith(".md"):
+                continue
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+            topic = fname[:-3]
+            entries = parse_text(text, topic)
+            if text.strip() and not entries:
+                issues.append(f"{sub}/{fname}: bevat tekst maar 0 parseerbare entries")
+                continue
+            if serialize_entries(entries).strip() != text.strip():
+                issues.append(f"{sub}/{fname}: tekst buiten het entry-formaat "
+                              "(handmatige edit of merge-restje)")
+            seen = {}
+            for e in entries:
+                fp = entry_fingerprint(e)
+                if fp in seen:
+                    issues.append(f"{sub}/{fname}: duplicaat '{e['title']}'")
+                seen[fp] = True
+                if not e["keywords"]:
+                    issues.append(f"{sub}/{fname}: '{e['title']}' heeft geen keywords")
+    return issues
+
+
+def cleanup_temp_files(store: str, max_age_s: int = 3600) -> int:
+    removed = 0
+    for sub in ("topics", "archive", ""):
+        d = os.path.join(store, sub) if sub else store
+        if not os.path.isdir(d):
+            continue
+        for fname in os.listdir(d):
+            if fname.startswith(".tmp-"):
+                p = os.path.join(d, fname)
+                try:
+                    import time as _t
+                    if _t.time() - os.path.getmtime(p) > max_age_s:
+                        os.unlink(p)
+                        removed += 1
+                except OSError:
+                    pass
+    return removed
+
+
+# ------------------------------------------------------------------ usage ---
+
+def record_usage(store: str, topic: str) -> None:
+    try:
+        with open(os.path.join(store, ".usage.jsonl"), "a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": datetime.datetime.now().isoformat(timespec="seconds"),
+                                "topic": topic}) + "\n")
+    except OSError:
+        pass
+
+
+def usage_counts(store: str, days: int = 90) -> dict:
+    path = os.path.join(store, ".usage.jsonl")
+    counts = {}
+    if not os.path.isfile(path):
+        return counts
+    cutoff = (datetime.datetime.now() - datetime.timedelta(days=days)).isoformat()
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("ts", "") >= cutoff:
+                    t = rec.get("topic", "")
+                    counts[t] = counts.get(t, 0) + 1
+    except OSError:
+        pass
+    return counts
 
 
 # ------------------------------------------------------ index & retrieval ---
@@ -425,7 +729,8 @@ def topic_summary(store: str, topic: str) -> dict:
 def rebuild_index(cfg: dict, root: str) -> str:
     lines, total = [], 0
     for label, store in read_stores(cfg, root):
-        for t in list_topics(store):
+        usage = usage_counts(store)
+        for t in sorted(list_topics(store), key=lambda t: (-usage.get(t, 0), t)):
             s = topic_summary(store, t)
             if not s["count"]:
                 continue
@@ -451,22 +756,44 @@ def rebuild_index(cfg: dict, root: str) -> str:
     return index
 
 
+def stem(w: str) -> str:
+    """Lichte NL/EN-suffixstripper zodat tekenen/tekening/daken/dak matchen."""
+    for suf in ("ingen", "en", "ing", "s"):
+        if w.endswith(suf) and len(w) - len(suf) >= 3:
+            return w[: -len(suf)]
+    return w
+
+
 def _prompt_words(prompt: str) -> set:
-    return {w for w in re.findall(r"\w+", prompt.lower()) if w not in STOPWORDS and len(w) > 2}
+    return {stem(w) for w in re.findall(r"\w+", prompt.lower())
+            if w not in STOPWORDS and len(w) > 2}
 
 
 def score_entry(entry: dict, prompt_words: set) -> int:
     score = 0
     for kw in entry["keywords"]:
         for part in re.findall(r"\w+", kw):
-            if part in prompt_words:
+            p = stem(part)
+            if p in prompt_words:
                 score += 3
+            elif len(p) >= 5:
+                # NL samenstellingen: dagplanning ~ planning, daktekening ~ tekening
+                if any(len(w) >= 5 and (p in w or w in p) for w in prompt_words):
+                    score += 2
     for w in re.findall(r"\w+", entry["title"].lower()):
-        if w not in STOPWORDS and w in prompt_words:
+        if w not in STOPWORDS and stem(w) in prompt_words:
             score += 2
-    body_words = set(re.findall(r"\w+", entry["body"].lower()))
-    score += len((body_words - STOPWORDS) & prompt_words) // 3
+    body_words = {stem(w) for w in re.findall(r"\w+", entry["body"].lower())
+                  if w not in STOPWORDS}
+    score += len(body_words & prompt_words) // 3
     return score
+
+
+def effective_semantic_threshold(cfg: dict, backend_name: str) -> float:
+    """Hash-vectoren scoren structureel lager dan modelvectoren; gemeten
+    optimum voor hint-injectie met hash is 0.12."""
+    th = cfg["semantic_threshold"]
+    return min(th, 0.12) if backend_name.startswith("hash") else th
 
 
 def matching_topics(cfg: dict, root: str, prompt: str):
@@ -574,7 +901,7 @@ def main() -> int:
     p_add.add_argument("--keywords", default="")
     p_add.add_argument("--body", required=True)
     p_add.add_argument("--refs", default="")
-    p_add.add_argument("--store", choices=["project", "global"], default=None)
+    p_add.add_argument("--store", choices=["project", "global", "customer"], default=None)
 
     p_cfg = sub.add_parser("config")
     p_cfg.add_argument("--root", default=os.getcwd())
@@ -586,6 +913,7 @@ def main() -> int:
     p_cfg.add_argument("--embedding-backend", dest="embedding_backend",
                        choices=["hash", "local", "voyage", "openai"])
     p_cfg.add_argument("--embedding-model", dest="embedding_model")
+    p_cfg.add_argument("--customer")
     p_cfg.add_argument("--show", action="store_true")
 
     p_re = sub.add_parser("reindex")
@@ -593,6 +921,9 @@ def main() -> int:
 
     p_adr = sub.add_parser("export-adr")
     p_adr.add_argument("--root", default=os.getcwd())
+
+    p_val = sub.add_parser("validate")
+    p_val.add_argument("--root", default=os.getcwd())
 
     args = parser.parse_args()
     root = find_project_root(args.root)
@@ -603,14 +934,19 @@ def main() -> int:
         keywords = args.keywords.split(",") if args.keywords else extract_keywords(args.body)
         refs = [r.strip() for r in args.refs.split(",") if r.strip()] \
             or extract_refs(args.body, root if store != global_store() else "")
-        result = append_entry(store, args.topic, args.title, keywords, args.body, refs=refs)
+        result = append_entry(store, args.topic, args.title, keywords, args.body, refs=refs, cfg=cfg)
         rebuild_index(cfg, root)
         try:
             import embeddings
             embeddings.sync(store, cfg)
         except Exception:
             pass
-        where = "globaal" if store == global_store() else "project"
+        if store == global_store():
+            where = "globaal"
+        elif cfg.get("customer") and store == customer_store(cfg["customer"]):
+            where = "klant"
+        else:
+            where = "project"
         if result["added"]:
             msg = f"opgeslagen in {where}/topics/{slug(args.topic)}.md"
             if result["redacted"]:
@@ -623,7 +959,7 @@ def main() -> int:
     elif args.cmd == "config":
         updates = {k: getattr(args, k) for k in
                    ("scope", "injection", "index_budget", "retrieval_budget",
-                    "retrieval", "embedding_backend", "embedding_model")
+                    "retrieval", "embedding_backend", "embedding_model", "customer")
                    if getattr(args, k, None) is not None}
         if updates:
             save_project_config(root, updates)
@@ -632,6 +968,16 @@ def main() -> int:
         print(json.dumps(cfg, indent=2))
     elif args.cmd == "reindex":
         print(rebuild_index(cfg, root))
+    elif args.cmd == "validate":
+        total = 0
+        for label, store in read_stores(cfg, root):
+            issues = validate_store(store)
+            total += len(issues)
+            status = "OK" if not issues else f"{len(issues)} bevinding(en)"
+            print(f"[{label}] {store}: {status}")
+            for issue in issues:
+                print(f"    {issue}")
+        return 1 if total else 0
     elif args.cmd == "export-adr":
         written = export_adr(root)
         if written:

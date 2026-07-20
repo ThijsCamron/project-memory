@@ -30,10 +30,16 @@ def verify_refs(store: str, root: str) -> int:
 
 
 def consolidate_store(store: str, cfg: dict, root: str = None) -> dict:
+    for issue in memlib.validate_store(store):
+        memlib.log(store, f"validator: {issue}")
+        print(f"  validator [{os.path.basename(store)}]: {issue}")
+    memlib.cleanup_temp_files(store)
     cutoff = (datetime.date.today() - datetime.timedelta(days=cfg["archive_days"])).isoformat()
     stats = {"deduped": 0, "archived": 0, "verouderd": 0}
     if root and store == memlib.project_store(root):
         stats["verouderd"] = verify_refs(store, root)
+    lock_ctx = memlib.store_lock(store)
+    lock_ctx.__enter__()
     for topic in memlib.list_topics(store):
         entries = memlib.topic_entries(store, topic)
         unique, seen = [], set()
@@ -56,6 +62,7 @@ def consolidate_store(store: str, cfg: dict, root: str = None) -> dict:
     marker = os.path.join(store, ".last_consolidation")
     with open(marker, "w", encoding="utf-8") as f:
         f.write(datetime.datetime.now().isoformat())
+    lock_ctx.__exit__(None, None, None)
     return stats
 
 
@@ -106,7 +113,8 @@ def main() -> int:
         stats = consolidate_store(store, cfg, root=root)
         for k in totals:
             totals[k] += stats.get(k, 0)
-        memlib.log(store, f"consolidate: {stats}")
+        memlib.log(store, f"consolidate: {stats['deduped']} dedupes, "
+                   f"{stats['archived']} gearchiveerd, {stats.get('verouderd', 0)} verouderd")
     try:
         import embeddings
         for _label, store in memlib.read_stores(cfg, root):

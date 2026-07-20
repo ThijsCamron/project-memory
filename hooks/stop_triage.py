@@ -13,13 +13,6 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import memlib  # noqa: E402
 
-TRIGGERS = [
-    (r"(?i)\b(besluit|beslissing|we kiezen|gekozen voor|decision)\b", "decisions"),
-    (r"(?i)\b(vanaf nu|voortaan|from now on|in plaats van|instead of)\b", "decisions"),
-    (r"(?i)\b(conventie|afspraak|stijlregel|convention|altijd .{3,40} gebruiken|never use|nooit .{3,40} gebruiken)\b", "conventions"),
-    (r"(?i)\b(onthoud|remember this|let op|valkuil|gotcha|bekende bug|known issue|pas op)\b", "gotchas"),
-]
-
 MAX_SENTENCE_LEN = 300
 MAX_NEW_PER_SESSION = 8
 
@@ -54,25 +47,19 @@ def sentences(text: str):
             yield s
 
 
-def triage(path: str):
+def triage(path: str, triggers):
     seen, found = set(), []
     for role, text in transcript_texts(path):
         for s in sentences(text):
             key = re.sub(r"\W+", " ", s.lower()).strip()
             if key in seen:
                 continue
-            for pattern, topic in TRIGGERS:
-                if re.search(pattern, s):
-                    seen.add(key)
-                    found.append((topic, s, role))
-                    break
+            topic = memlib.classify(s, triggers)
+            if topic:
+                seen.add(key)
+                found.append((topic, s, role))
     found.sort(key=lambda t: 0 if t[2] == "user" else 1)
     return found[:MAX_NEW_PER_SESSION]
-
-
-def title_from(sentence: str) -> str:
-    words = sentence.split()
-    return " ".join(words[:9]) + ("..." if len(words) > 9 else "")
 
 
 def maybe_consolidate(store: str, root: str) -> None:
@@ -100,11 +87,12 @@ def main() -> int:
 
     store = memlib.write_store(cfg, root)
     saved, redacted = 0, 0
-    for topic, sentence, _role in triage(data.get("transcript_path", "")):
+    triggers = memlib.get_triggers(cfg)
+    for topic, sentence, _role in triage(data.get("transcript_path", ""), triggers):
         keywords = memlib.extract_keywords(sentence)
         refs = memlib.extract_refs(sentence, root)
-        result = memlib.append_entry(store, topic, title_from(sentence),
-                                     keywords, sentence, refs=refs)
+        result = memlib.append_entry(store, topic, memlib.title_from(sentence),
+                                     keywords, sentence, refs=refs, cfg=cfg)
         if result["added"]:
             saved += 1
             redacted += result["redacted"]

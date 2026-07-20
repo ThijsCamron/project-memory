@@ -41,11 +41,11 @@ HASH_DIM = 256
 # --------------------------------------------------------------- backends ---
 
 class HashEmbedder:
-    name = "hash-v1"
+    name = "hash-v2"
     dim = HASH_DIM
 
     def _tokens(self, text: str):
-        words = [w for w in re.findall(r"\w+", text.lower())
+        words = [memlib.stem(w) for w in re.findall(r"\w+", text.lower())
                  if len(w) > 2 and w not in memlib.STOPWORDS]
         return words + [f"{a}_{b}" for a, b in zip(words, words[1:])]
 
@@ -161,7 +161,7 @@ def _unpack(blob: bytes, dim: int):
 
 def _ensure_gitignore(store: str) -> None:
     path = os.path.join(store, ".gitignore")
-    wanted = {".index.db", ".log", ".last_consolidation"}
+    wanted = {".index.db", ".lock", ".log", ".last_consolidation", ".usage.jsonl", "report.html"}
     have = set()
     if os.path.isfile(path):
         with open(path, encoding="utf-8") as f:
