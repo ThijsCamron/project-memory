@@ -60,6 +60,7 @@ De instelling landt in `.claude/memory/config.json` en reist mee met de repo. Vo
 | `/project-memory:memory-export-adr` | beslissingen als ADR's naar docs/adr/ |
 | `/project-memory:memory-report` | HTML-dashboard: activiteit, tijdlijn, kosten, gebruik |
 | `/project-memory:memory-recent [dagen]` | terminal-tijdlijn van recente activiteit |
+| `/project-memory:memory-bootstrap` | start-memory uit de git-historie van een bestaand project |
 | `/project-memory:memory-import <pad>` | destilleer een document of transcript naar entries |
 | `/project-memory:memory-import-jira <key>` | destilleer blijvende kennis uit een Jira-project |
 | `/project-memory:memory-asof <ref>` | tijdmachine: wat wisten we toen |
@@ -72,6 +73,10 @@ claude --plugin-dir /pad/naar/project-memory
 ```
 
 Omgevingsvariabelen (winnen van elke config): `MEMORY_SCOPE`, `MEMORY_INJECTION`, `MEMORY_INDEX_BUDGET`, `MEMORY_RETRIEVAL_BUDGET`, `MEMORY_ARCHIVE_DAYS`, `MEMORY_MAX_ENTRIES`.
+
+## Bootstrap voor bestaande projecten (v0.12)
+
+`/project-memory:memory-bootstrap` bouwt een start-memory voor een project dat nooit een kickoff had, uit zijn eigen git-historie. Het script mijnt deterministisch: relevante commits (triviale zoals "fix typo" en "bump version" worden weggefilterd; commits met een body of besluit-achtige woorden krijgen voorrang, want daar staat de waarom), TODO/FIXME/HACK-comments met bestand en regelnummer, de README-kop en de release-tags. Claude destilleert dat in de sessie naar entries: commit-rationales worden decisions met bronvermelding van de hash, code-TODO's worden gotchas met het bestandspad als ref (zodat de dagelijkse verificatie er direct op werkt), README en tags worden context. Daarna vult de normale triage het geheugen verder aan, en werkt ook de tijdmachine over de geadopteerde historie.
 
 ## Zelf herkennen wat bewaard moet worden (v0.11)
 
