@@ -74,6 +74,10 @@ claude --plugin-dir /pad/naar/project-memory
 
 Omgevingsvariabelen (winnen van elke config): `MEMORY_SCOPE`, `MEMORY_INJECTION`, `MEMORY_INDEX_BUDGET`, `MEMORY_RETRIEVAL_BUDGET`, `MEMORY_ARCHIVE_DAYS`, `MEMORY_MAX_ENTRIES`.
 
+## Gezond-verstand-scope (v0.12.1)
+
+Opslaan met "globaal" en terugzoeken zien nu altijd dezelfde wereld: heeft de globale store inhoud, dan doet hij standaard mee in index, hints en search, ook zonder dat er ooit een scope is ingesteld. Een expliciete keuze voor scope=project (in project- of globale config, of via env) blijft de opt-out. De search-melding toont voortaan waarin er gezocht is ("gezocht in: project, globaal") in plaats van de kale scope-waarde.
+
 ## Bootstrap voor bestaande projecten (v0.12)
 
 `/project-memory:memory-bootstrap` bouwt een start-memory voor een project dat nooit een kickoff had, uit zijn eigen git-historie. Het script mijnt deterministisch: relevante commits (triviale zoals "fix typo" en "bump version" worden weggefilterd; commits met een body of besluit-achtige woorden krijgen voorrang, want daar staat de waarom), TODO/FIXME/HACK-comments met bestand en regelnummer, de README-kop en de release-tags. Claude destilleert dat in de sessie naar entries: commit-rationales worden decisions met bronvermelding van de hash, code-TODO's worden gotchas met het bestandspad als ref (zodat de dagelijkse verificatie er direct op werkt), README en tags worden context. Daarna vult de normale triage het geheugen verder aan, en werkt ook de tijdmachine over de geadopteerde historie.
