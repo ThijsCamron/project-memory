@@ -227,6 +227,14 @@ def save_project_config(root: str, updates: dict) -> dict:
     return cfg
 
 
+def _scope_explicitly_set(root: str) -> bool:
+    for path in (os.path.join(project_store(root), "config.json"),
+                 os.path.join(global_store(), "..", "config.json")):
+        if "scope" in _read_json(path):
+            return True
+    return "MEMORY_SCOPE" in os.environ
+
+
 def read_stores(cfg: dict, root: str):
     if cfg["scope"] == "off":
         return []
@@ -235,7 +243,16 @@ def read_stores(cfg: dict, root: str):
         stores.append(("project", project_store(root)))
     if cfg.get("customer") and cfg["scope"] != "off":
         stores.append(("klant", customer_store(cfg["customer"])))
-    if cfg["scope"] in ("global", "both"):
+    include_global = cfg["scope"] in ("global", "both")
+    if (not include_global and cfg["scope"] == "project"
+            and not _scope_explicitly_set(root)):
+        # niemand heeft ooit een scope gekozen: heeft de globale store inhoud,
+        # dan doet hij gewoon mee -- opslaan-met-globaal en terugzoeken horen
+        # dezelfde wereld te zien
+        g = global_store()
+        if os.path.isdir(os.path.join(g, "topics")) and list_topics(g):
+            include_global = True
+    if include_global:
         stores.append(("globaal", global_store()))
     return stores
 
