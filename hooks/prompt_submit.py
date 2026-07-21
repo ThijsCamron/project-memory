@@ -33,6 +33,8 @@ def _semantic_topic_hits(cfg, root):
         hits = {}
         if not embeddings or cfg["retrieval"] == "keyword":
             return hits
+        if len(memlib._prompt_words(prompt)) < 3:
+            return hits  # te weinig signaal voor semantiek; keyword-pad dekt dit
         emb_name = embeddings.get_embedder(cfg).name
         th = memlib.effective_semantic_threshold(cfg, emb_name)
         for label, store in memlib.read_stores(cfg, root):
@@ -60,9 +62,13 @@ def topic_hits(cfg, root, prompt):
 
 
 def render_full(entries) -> str:
-    return "\n\n".join(
-        f"[{e.get('herkomst','project')}/{e['topic']} | {e['date']}] {e['title']}\n{e['body']}"
-        for e in entries)
+    parts = []
+    for e in entries:
+        body = e["body"]
+        if e.get("doc") and len(body) > 1200:
+            body = body[:1200] + f"\n... (vrij document, lees volledig: {e.get('path','')})"
+        parts.append(f"[{e.get('herkomst','project')}/{e['topic']} | {e['date']}] {e['title']}\n{body}")
+    return "\n\n".join(parts)
 
 
 def full_entries(cfg, root, prompt, budget):

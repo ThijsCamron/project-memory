@@ -16,6 +16,8 @@ def verify_refs(store: str, root: str) -> int:
     stale_total = 0
     for topic in memlib.list_topics(store):
         entries = memlib.topic_entries(store, topic)
+        if any(e.get("doc") for e in entries):
+            continue
         fresh, stale = [], []
         for e in entries:
             missing = [r for r in e.get("refs", []) if not os.path.isfile(os.path.join(root, r))]
@@ -42,6 +44,8 @@ def consolidate_store(store: str, cfg: dict, root: str = None) -> dict:
     lock_ctx.__enter__()
     for topic in memlib.list_topics(store):
         entries = memlib.topic_entries(store, topic)
+        if any(e.get("doc") for e in entries):
+            continue  # vrij document: laten zoals de gebruiker het neerzette
         unique, seen = [], set()
         for e in entries:
             fp = memlib.entry_fingerprint(e)
@@ -67,6 +71,7 @@ def consolidate_store(store: str, cfg: dict, root: str = None) -> dict:
 
 
 def status(cfg: dict, root: str) -> int:
+    memlib.rebuild_index(cfg, root)  # status toont altijd de actuele werkelijkheid
     print(f"Scope: {cfg['scope']} | injectie: {cfg['injection']}")
     print(f"Budgetten: index {cfg['index_budget']} tokens, retrieval {cfg['retrieval_budget']} tokens")
     stores = memlib.read_stores(cfg, root)

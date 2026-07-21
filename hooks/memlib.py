@@ -78,6 +78,7 @@ ENV_MAP = {
 
 STOPWORDS = set(
     """de het een en of maar want dus als dan dat dit die deze er is zijn was waren
+    wat hoe waar wie waarom wanneer welke welk hoeveel zullen moet moeten kan kunnen doen
     wordt worden met voor naar van in op aan bij uit om te ook nog al wel niet geen
     ik je jij we wij ze zij hij u hun ons onze mijn jouw heeft hebben had alle even
     kun plaats nieuwe the a an and or but so if then that this these those there is
@@ -454,8 +455,34 @@ def write_validated(path: str, topic: str, entries: list) -> bool:
     return True
 
 
+def _doc_entry(path: str, topic: str, text: str) -> dict:
+    """Een vrij document (gewone .md zonder entry-opmaak) gedraagt zich als
+    1 entry: doorzoekbaar als geheel, met het pad erbij zodat Claude het
+    volledige bestand zelf kan lezen (pull-model)."""
+    title = topic
+    m = re.search(r"^#\s+(.+)$", text, re.MULTILINE)
+    if m:
+        title = m.group(1).strip()[:120]
+    mtime = datetime.date.fromtimestamp(os.path.getmtime(path)).isoformat()
+    return {
+        "topic": topic, "date": mtime, "title": title,
+        "keywords": extract_keywords(text, limit=12),
+        "refs": [], "supersedes": "", "body": text,
+        "doc": True, "path": path,
+    }
+
+
 def topic_entries(store: str, topic: str):
-    return parse_entries(topic_path(store, topic), topic)
+    path = topic_path(store, topic)
+    entries = parse_entries(path, topic)
+    if entries:
+        return entries
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        if text.strip():
+            return [_doc_entry(path, topic, text)]
+    return []
 
 
 def all_entries(store: str):
@@ -663,8 +690,7 @@ def validate_store(store: str) -> list:
             topic = fname[:-3]
             entries = parse_text(text, topic)
             if text.strip() and not entries:
-                issues.append(f"{sub}/{fname}: bevat tekst maar 0 parseerbare entries")
-                continue
+                continue  # vrij document: doorzoekbaar als geheel, geen fout
             if serialize_entries(entries).strip() != text.strip():
                 issues.append(f"{sub}/{fname}: tekst buiten het entry-formaat "
                               "(handmatige edit of merge-restje)")
@@ -781,9 +807,21 @@ def stem(w: str) -> str:
     return w
 
 
+def stems(w: str) -> set:
+    """Alle matchvarianten van een woord: normale stem, plus de stam zonder
+    Nederlands ge-voorvoegsel (gehost -> host) als extra kandidaat."""
+    out = {stem(w)}
+    if w.startswith("ge") and len(w) > 5:
+        out.add(stem(w[2:]))
+    return out
+
+
 def _prompt_words(prompt: str) -> set:
-    return {stem(w) for w in re.findall(r"\w+", prompt.lower())
-            if w not in STOPWORDS and len(w) > 2}
+    words = set()
+    for w in re.findall(r"\w+", prompt.lower()):
+        if w not in STOPWORDS and len(w) > 2:
+            words |= stems(w)
+    return words
 
 
 def score_entry(entry: dict, prompt_words: set) -> int:
@@ -796,13 +834,21 @@ def score_entry(entry: dict, prompt_words: set) -> int:
             elif len(p) >= 5:
                 # NL samenstellingen: dagplanning ~ planning, daktekening ~ tekening
                 if any(len(w) >= 5 and (p in w or w in p) for w in prompt_words):
-                    score += 2
+                    score += 3
     for w in re.findall(r"\w+", entry["title"].lower()):
         if w not in STOPWORDS and stem(w) in prompt_words:
-            score += 2
-    body_words = {stem(w) for w in re.findall(r"\w+", entry["body"].lower())
-                  if w not in STOPWORDS}
-    score += len(body_words & prompt_words) // 3
+            score += 3 if len(w) >= 5 else 1
+    body_words = set()
+    for w in re.findall(r"\w+", entry["body"].lower()):
+        if w not in STOPWORDS:
+            body_words |= stems(w)
+    overlap = len(body_words & prompt_words)
+    if entry.get("doc"):
+        # vrij document (door de gebruiker neergezet): 1 sterk woord is een
+        # zinvolle verwijzing en telt als keywordmatch
+        score += max(3, overlap) if overlap else 0
+    else:
+        score += overlap // 3
     return score
 
 
@@ -821,7 +867,7 @@ def matching_topics(cfg: dict, root: str, prompt: str):
     for label, store in read_stores(cfg, root):
         for t in list_topics(store):
             score = sum(score_entry(e, pw) for e in topic_entries(store, t))
-            if score > 0:
+            if score >= 3:
                 hits.append((label, t, os.path.join(store, "topics", f"{t}.md"), score))
     hits.sort(key=lambda h: -h[3])
     return hits
@@ -840,7 +886,7 @@ def select_relevant(cfg: dict, root: str, prompt: str, budget_tokens: int):
     scored.sort(key=lambda p: (-p[0], p[1]["date"]))
     picked, used = [], 0
     for _s, e in scored:
-        cost = token_estimate(e["title"] + e["body"])
+        cost = 400 if e.get("doc") else token_estimate(e["title"] + e["body"])
         if used + cost > budget_tokens:
             continue
         picked.append(e)

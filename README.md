@@ -74,6 +74,10 @@ claude --plugin-dir /pad/naar/project-memory
 
 Omgevingsvariabelen (winnen van elke config): `MEMORY_SCOPE`, `MEMORY_INJECTION`, `MEMORY_INDEX_BUDGET`, `MEMORY_RETRIEVAL_BUDGET`, `MEMORY_ARCHIVE_DAYS`, `MEMORY_MAX_ENTRIES`.
 
+## Vrije documenten en ge-stemming (v0.13)
+
+Een gewoon .md-bestand (handleiding, wiki-pagina) mag nu rechtstreeks in een topics-map worden gezet: heeft het geen entry-opmaak, dan gedraagt het zich als 1 doorzoekbaar document. Het telt mee in de index en de hints, zoekresultaten tonen het begin met een verwijzing naar het volledige bestand, en Claude leest het via het pull-model zelf. De consolidatie en verificatie laten zulke documenten met rust (de gebruiker beheert ze), entries eraan toevoegen wordt geweigerd met een duidelijke melding, en de validator ziet ze als normaal. Daarnaast kent de stemming nu het Nederlandse ge-voorvoegsel als matchvariant: "hoe wordt alles gehost" vindt een document vol "host" en "hosting". Onderweg is de hint-kwaliteit aangescherpt: NL-vraagwoorden (wat, hoe, welke) tellen niet meer mee als inhoud, een hint vereist een minimumscore van 3 zodat een los kort titelwoord geen hint meer triggert, en specifieke signalen (samenstellingen, titelwoorden van 5+ tekens, documentmatches) tellen volwaardig. Gemeten: gouden set 100% top-3, alle ruisvragen stil, relevante persoonshints blijven werken.
+
 ## Gezond-verstand-scope (v0.12.1)
 
 Opslaan met "globaal" en terugzoeken zien nu altijd dezelfde wereld: heeft de globale store inhoud, dan doet hij standaard mee in index, hints en search, ook zonder dat er ooit een scope is ingesteld. Een expliciete keuze voor scope=project (in project- of globale config, of via env) blijft de opt-out. De search-melding toont voortaan waarin er gezocht is ("gezocht in: project, globaal") in plaats van de kale scope-waarde.
