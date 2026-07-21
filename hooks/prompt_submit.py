@@ -95,9 +95,11 @@ def cli_search(query: str) -> int:
         return 0
     entries = full_entries(cfg, root, query, budget=4000)
     if not entries:
-        print(f"Geen memories gevonden voor: {query}")
+        waar = ", ".join(label for label, _s in memlib.read_stores(cfg, root)) or "geen stores actief"
+        print(f"Geen memories gevonden voor: {query} (gezocht in: {waar})")
         return 0
-    print(f"{len(entries)} match(es) (scope={cfg['scope']}, retrieval={cfg['retrieval']}):\n")
+    waar = ", ".join(label for label, _s in memlib.read_stores(cfg, root))
+    print(f"{len(entries)} match(es) (gezocht in: {waar}):\n")
     print(render_full(entries))
     return 0
 
