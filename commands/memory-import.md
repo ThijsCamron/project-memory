@@ -41,8 +41,6 @@ python3 "${CLAUDE_PLUGIN_ROOT}/hooks/memlib.py" add --topic <topic> --title "<ti
 
 Secret-scrubbing, deduplicatie en conflictdetectie gelden automatisch. Is er een doeltopic meegegeven in de opdracht, gebruik dan dat topic voor alle entries.
 
-Zegt de gebruiker "globaal" of "klant", voeg dan --store global respectievelijk --store customer toe aan elk add-commando.
-
 ## Stap 4: samenvatting
 
 Geef de gebruiker een compacte samenvatting van wat er is opgeslagen: per topic de entries in 1 regel, plus de onzekere interpretaties. Dit is het controlemoment; de bron-chunks staan in .claude/memory/imports/ (gitignored).

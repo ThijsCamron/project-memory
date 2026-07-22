@@ -61,6 +61,7 @@ De instelling landt in `.claude/memory/config.json` en reist mee met de repo. Vo
 | `/project-memory:memory-report` | HTML-dashboard: activiteit, tijdlijn, kosten, gebruik |
 | `/project-memory:memory-recent [dagen]` | terminal-tijdlijn van recente activiteit |
 | `/project-memory:memory-bootstrap` | start-memory uit de git-historie van een bestaand project |
+| `/project-memory:memory-setup-embeddings` | eenmalig: semantische embeddings installeren en aanzetten |
 | `/project-memory:memory-import <pad>` | destilleer een document of transcript naar entries |
 | `/project-memory:memory-import-jira <key>` | destilleer blijvende kennis uit een Jira-project |
 | `/project-memory:memory-asof <ref>` | tijdmachine: wat wisten we toen |
@@ -73,6 +74,14 @@ claude --plugin-dir /pad/naar/project-memory
 ```
 
 Omgevingsvariabelen (winnen van elke config): `MEMORY_SCOPE`, `MEMORY_INJECTION`, `MEMORY_INDEX_BUDGET`, `MEMORY_RETRIEVAL_BUDGET`, `MEMORY_ARCHIVE_DAYS`, `MEMORY_MAX_ENTRIES`.
+
+## BM25-ranking plus versheid en gebruik (v0.16)
+
+De rangschikking van hints en zoekresultaten gebruikt nu drie extra signalen bovenop de bestaande poort (die ongewijzigd bepaalt OF iets een hint waard is; alleen de volgorde is verbeterd). Ten eerste BM25 via SQLite FTS5, in de bestaande .index.db en dus zonder enige dependency: een full-text-index op de gestemde tekst (NL-varianten en samenstellingen blijven werken), waarbij titel 3x en keywords 4x wegen, en zeldzame termen vanzelf zwaar tellen (IDF) en veelvoorkomende licht. Dit vervangt handmatige term-weging structureel; de index bouwt zichzelf bij de eerstvolgende sync. Ten tweede versheid: topics met entries van de laatste 30/90 dagen krijgen een kleine voorsprong. Ten derde gebruik: topics die het team de laatste 30 dagen echt las, stijgen licht. Gemeten effect op de gouden set: top-1 van 69% naar 73% bij gelijkblijvende 100% top-3, ruisvragen blijven stil, BM25-query 4ms over 1500 entries, hint-latency onveranderd. De versheids- en gebruiksbonussen zijn op de statische testset per definitie neutraal; hun effect groeit juist op levende data waar datums en leesgedrag verschillen.
+
+## Semantische embeddings met een command (v0.15)
+
+`/project-memory:memory-setup-embeddings` installeert in een keer echte semantiek: het maakt een eigen venv aan (geisoleerd van het systeem-Python), installeert sentence-transformers, downloadt het model, draait een proef en zet de machine-config om. Tot die tijd draait alles gewoon op de hash-backend, en herinnert de sessiestart je er met 1 regel aan. De backend-default is nu "auto": staat de venv er, dan gebruiken sync, search en conflictdetectie het echte model (synoniemen: "gehost" vindt ook "VPS" en "hosting"); de per-prompt hints blijven bewust op het snelle keyword-pad (~80ms), omdat het model per aanroep seconden laadtijd kost en er geen achtergrondproces is dat het warm houdt. Een expliciet ingestelde backend wint altijd van auto. De installatie gebeurt nooit stiekem vanuit een hook: het is een zichtbare, eenmalige actie per machine.
 
 ## Vrije documenten en ge-stemming (v0.13)
 

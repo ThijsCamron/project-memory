@@ -14,4 +14,4 @@ Sla het volgende op in de memory: $ARGUMENTS
 python3 "${CLAUDE_PLUGIN_ROOT}/hooks/memlib.py" add --topic <topic> --title "<titel>" --keywords "<kw1,kw2,kw3>" --body "<volledige tekst>" [--store global]
 ```
 
-Bevestig kort wat er is opgeslagen, in welk topic en in welke store.
+Bevestig kort wat er is opgeslagen, in welk topic en in welke store. Gaat het om een heel document (handleiding, wiki-pagina), sla het dan NIET op als entry: kopieer het bestand als geheel naar de topics-map van de juiste store (vrij document) of stel /project-memory:memory-import voor.

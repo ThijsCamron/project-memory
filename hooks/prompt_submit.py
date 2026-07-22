@@ -35,6 +35,8 @@ def _semantic_topic_hits(cfg, root):
             return hits
         if len(memlib._prompt_words(prompt)) < 3:
             return hits  # te weinig signaal voor semantiek; keyword-pad dekt dit
+        if getattr(embeddings.get_embedder(cfg), "slow", False):
+            return hits  # model-per-aanroep is te traag voor het per-prompt pad
         emb_name = embeddings.get_embedder(cfg).name
         th = memlib.effective_semantic_threshold(cfg, emb_name)
         for label, store in memlib.read_stores(cfg, root):
@@ -58,6 +60,28 @@ def topic_hits(cfg, root, prompt):
             norm = min(1.0, score / 10.0)
             if key not in hits or norm > hits[key]["score"]:
                 hits[key] = {"score": norm, "path": path}
+    if hits:
+        # rangschikkingsbonussen (poort blijft matching_topics >= 3):
+        # BM25/IDF: zeldzame matchtermen wegen zwaar; plus versheid en gebruik
+        import datetime as _dt
+        today = _dt.date.today()
+        d30 = (today - _dt.timedelta(days=30)).isoformat()
+        d90 = (today - _dt.timedelta(days=90)).isoformat()
+        for label, store in memlib.read_stores(cfg, root):
+            bm = embeddings.bm25_topic_scores(store, cfg, prompt) if embeddings else {}
+            usage = memlib.usage_counts(store, days=30)
+            for (l, t), info in hits.items():
+                if l != label:
+                    continue
+                bonus = 0.5 * min(1.0, bm.get(t, 0.0) / 10.0)
+                bonus += 0.1 * min(usage.get(t, 0), 3) / 3.0
+                latest = max((e["date"] for e in memlib.topic_entries(store, t)),
+                             default="")
+                if latest >= d30:
+                    bonus += 0.15
+                elif latest >= d90:
+                    bonus += 0.05
+                info["score"] += bonus
     return dict(sorted(hits.items(), key=lambda kv: -kv[1]["score"]))
 
 

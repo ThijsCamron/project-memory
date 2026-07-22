@@ -53,7 +53,7 @@ DEFAULTS = {
     "retrieval": "hybrid",
     "conflict_threshold": 0.8,
     "triggers": [],
-    "embedding_backend": "hash",
+    "embedding_backend": "auto",
     "embedding_model": "",
     "semantic_threshold": 0.25,
     "customer": "",
@@ -613,6 +613,12 @@ def _append_entry_unlocked(store: str, topic: str, title: str, keywords, body: s
     Resultaat: {added, reason, redacted, superseded:[titels]}
     """
     ensure_store(store)
+    if len(body) > 6000:
+        return {"added": False, "reason": "body is te groot voor een entry "
+                "(~>1500 tokens); zet het als geheel bestand in topics/ "
+                "(vrij document, automatisch doorzoekbaar) of gebruik "
+                "/project-memory:memory-import om het te destilleren",
+                "redacted": 0, "superseded": []}
     combined = f"{title}\n{body}"
     clean, redacted, refused = scrub_secrets(combined)
     if refused:
@@ -814,6 +820,16 @@ def stems(w: str) -> set:
     if w.startswith("ge") and len(w) > 5:
         out.add(stem(w[2:]))
     return out
+
+
+def stem_text(text: str) -> str:
+    """Tekst als gestemde token-stroom (alle matchvarianten), voor de
+    FTS5/BM25-index; zo blijven dagplanning~planning en gehost~host werken."""
+    out = []
+    for w in re.findall(r"\w+", text.lower()):
+        if w not in STOPWORDS and len(w) > 2:
+            out.extend(sorted(stems(w)))
+    return " ".join(out)
 
 
 def _prompt_words(prompt: str) -> set:

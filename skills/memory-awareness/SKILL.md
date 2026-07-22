@@ -26,4 +26,4 @@ Gebruik exact dezelfde route als /project-memory:memory-save:
 python3 "${CLAUDE_PLUGIN_ROOT}/hooks/memlib.py" add --topic <topic> --title "<max 9 woorden>" --keywords "<3-6 trefwoorden>" --body "<zelfstandig leesbare zin of alinea>"
 ```
 
-Deduplicatie, secret-scrubbing en conflictdetectie gelden automatisch; dubbel opslaan kan dus geen kwaad, het wordt geweigerd. Bevestig het in je antwoord met precies 1 korte regel, bijvoorbeeld: "(vastgelegd in memory: TypeScript als projecttaal)". Maximaal een paar keer per sessie; kwaliteit boven volledigheid.
+Deduplicatie, secret-scrubbing en conflictdetectie gelden automatisch; dubbel opslaan kan dus geen kwaad, het wordt geweigerd. Bevestig het in je antwoord met precies 1 korte regel, bijvoorbeeld: "(vastgelegd in memory: TypeScript als projecttaal)". Maximaal een paar keer per sessie; kwaliteit boven volledigheid. Sla NOOIT een heel document of bestand op als entry-body; kopieer het bestand als geheel naar de topics-map (dan is het als vrij document doorzoekbaar) of gebruik /project-memory:memory-import.

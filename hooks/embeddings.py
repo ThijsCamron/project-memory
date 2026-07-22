@@ -76,6 +76,49 @@ class LocalEmbedder:
                 self._m.encode(texts, normalize_embeddings=True)]
 
 
+VENV_DIR = os.path.join(os.path.expanduser("~"), ".claude", "project-memory", "venv")
+
+
+def venv_python() -> str:
+    return os.path.join(VENV_DIR, "Scripts" if os.name == "nt" else "bin",
+                        "python.exe" if os.name == "nt" else "python3")
+
+
+_BRIDGE = (
+    "import sys, json\n"
+    "from sentence_transformers import SentenceTransformer\n"
+    "m = SentenceTransformer(sys.argv[1])\n"
+    "texts = json.load(sys.stdin)\n"
+    "vecs = m.encode(texts, normalize_embeddings=True)\n"
+    "print(json.dumps([[float(x) for x in v] for v in vecs]))\n"
+)
+
+
+class VenvLocalEmbedder:
+    """Zelfde model als LocalEmbedder, maar via de setup-venv (subprocess).
+    slow=True: per aanroep wordt het model geladen (seconden), dus alleen
+    geschikt voor sync, search en conflictdetectie, niet voor het per-prompt
+    hint-pad."""
+    slow = True
+
+    def __init__(self, model: str):
+        self.model_name = model or "all-MiniLM-L6-v2"
+        self.name = f"local:{self.model_name}"
+        if not os.path.isfile(venv_python()):
+            raise RuntimeError("embeddings-venv ontbreekt; draai "
+                               "/project-memory:memory-setup-embeddings")
+
+    def embed_batch(self, texts):
+        import subprocess
+        r = subprocess.run([venv_python(), "-c", _BRIDGE, self.model_name],
+                           input=json.dumps(list(texts)), capture_output=True,
+                           text=True, timeout=600)
+        if r.returncode != 0:
+            tail = r.stderr.strip().splitlines()[-1] if r.stderr.strip() else "?"
+            raise RuntimeError(f"venv-embedding faalde: {tail}")
+        return json.loads(r.stdout.strip().splitlines()[-1])
+
+
 class _ApiEmbedder:
     url = ""
     key_env = ""
@@ -123,8 +166,17 @@ def get_embedder(cfg: dict, store: str = ""):
     backend = str(cfg.get("embedding_backend", "hash"))
     model = str(cfg.get("embedding_model", "") or "")
     try:
+        if backend == "auto":
+            # beste beschikbare zonder configuratie: venv-model als de setup
+            # ooit gedraaid is, anders hash
+            if os.path.isfile(venv_python()):
+                return VenvLocalEmbedder(model)
+            return HashEmbedder()
         if backend == "local":
-            return LocalEmbedder(model)
+            try:
+                return LocalEmbedder(model)  # in-process als de lib er is
+            except ImportError:
+                return VenvLocalEmbedder(model)
         if backend == "voyage":
             return VoyageEmbedder(model)
         if backend == "openai":
@@ -183,6 +235,22 @@ def sync(store: str, cfg: dict) -> dict:
 
     con = _connect(store)
     try:
+        con.execute("CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5("
+                    "title, keywords, body, topic UNINDEXED, fingerprint UNINDEXED)")
+        fts_known = {r[0] for r in con.execute("SELECT fingerprint FROM fts")}
+        fts_stale = [fp for fp in fts_known if fp not in entries]
+        if fts_stale:
+            con.executemany("DELETE FROM fts WHERE fingerprint=?",
+                            [(fp,) for fp in fts_stale])
+        fts_todo = [(fp, e) for fp, e in entries.items() if fp not in fts_known]
+        if fts_todo:
+            con.executemany(
+                "INSERT INTO fts(title, keywords, body, topic, fingerprint) "
+                "VALUES(?,?,?,?,?)",
+                [(memlib.stem_text(e["title"]),
+                  memlib.stem_text(" ".join(e["keywords"])),
+                  memlib.stem_text(e["body"]),
+                  e["topic"], fp) for fp, e in fts_todo])
         rows = con.execute("SELECT fingerprint, model FROM vectors").fetchall()
         known = {fp for fp, model in rows if model == embedder.name}
         stale = [fp for fp, model in rows
@@ -206,6 +274,31 @@ def sync(store: str, cfg: dict) -> dict:
                 "backend": embedder.name}
     finally:
         con.close()
+
+
+def bm25_topic_scores(store: str, cfg: dict, prompt: str) -> dict:
+    """{topic: relevantie} via SQLite FTS5/BM25 op de gestemde index.
+    Titel weegt 3x, keywords 4x, body 1x; zeldzame termen tellen vanzelf
+    zwaar (IDF), veelvoorkomende licht."""
+    words = sorted(memlib._prompt_words(prompt))
+    if not words or not os.path.isfile(db_path(store)):
+        return {}
+    query = " OR ".join(f'"{w}"' for w in words)
+    try:
+        con = _connect(store)
+        try:
+            rows = con.execute(
+                "SELECT topic, bm25(fts, 3.0, 4.0, 1.0) FROM fts WHERE fts MATCH ?",
+                (query,)).fetchall()
+        finally:
+            con.close()
+    except Exception:
+        return {}
+    scores = {}
+    for topic, rank in rows:
+        rel = max(0.0, -float(rank))
+        scores[topic] = scores.get(topic, 0.0) + rel
+    return scores
 
 
 def search(store: str, cfg: dict, query: str, top_k: int = 10):

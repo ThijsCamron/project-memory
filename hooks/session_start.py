@@ -36,6 +36,14 @@ def main() -> int:
             used += cost
         index = "\n".join(kept)
 
+    try:
+        import embeddings as _emb
+        if (str(cfg.get("embedding_backend")) == "auto"
+                and not os.path.isfile(_emb.venv_python())):
+            index += ("\n(tip: draai eenmalig /project-memory:memory-setup-embeddings "
+                      "voor semantisch zoeken met synoniemen)")
+    except Exception:
+        pass
     memlib.emit_context("SessionStart", index)
     for _label, store in stores:
         if os.path.isdir(store):
